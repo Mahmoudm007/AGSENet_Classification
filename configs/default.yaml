@@ -1,0 +1,33 @@
+# Training configuration
+data_path: "Dataset_classes/1 Defined"
+image_size: 256
+batch_size: 16
+epochs: 150
+learning_rate: 0.001
+weight_decay: 1e-4
+num_workers: 4
+output_dir: "outputs"
+seed: 42
+
+# Model configuration
+model_channels: 64
+dropout: 0.3
+num_classes: 5
+
+# Optimizer / Scheduler
+scheduler_type: "cosine"  # "cosine" or "step"
+
+# Loss configuration
+loss_name: "weighted_cross_entropy" # options: "cross_entropy", "weighted_cross_entropy", "focal", "class_balanced_focal"
+use_class_weights: true
+class_weight_mode: "inverse" # options: "inverse", "median_frequency", "normalized_inverse", "manual"
+focal_gamma: 2.0
+focal_alpha: null
+label_smoothing: 0.0
+
+# Inference/Validation
+val_split_ratio: 0.15
+test_split_ratio: 0.1
+validate_every_n_epochs: 1
+export_gradcam_on_eval: false
+gradcam_target_layer: "auto" # "auto" will select the final fusion block
