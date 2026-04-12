@@ -12,8 +12,8 @@ seed: 42
 # Model configuration
 model_channels: 64
 dropout: 0.3
-num_classes: 3
-merge_classes: true
+num_classes: 5
+merge_classes: false
 
 # Optimizer / Scheduler
 scheduler_type: "cosine"  # "cosine" or "step"
@@ -21,12 +21,30 @@ scheduler_type: "cosine"  # "cosine" or "step"
 # Loss configuration
 loss_name: "weighted_cross_entropy" # options: "cross_entropy", "weighted_cross_entropy", "focal", "class_balanced_focal"
 use_class_weights: true
-class_weight_mode: "balanced" # options: "inverse", "median_frequency", "normalized_inverse", "manual", "balanced"
+class_weight_mode: "effective_num" # options: "inverse", "median_frequency", "normalized_inverse", "manual", "balanced", "effective_num"
+class_weight_beta: 0.9999
 focal_gamma: 2.0
 focal_alpha: null
 label_smoothing: 0.0
+use_weighted_sampler: true
+sampler_weight_mode: "effective_num"
+sampler_weight_beta: 0.9999
 
 # Inference/Validation
 validate_every_n_epochs: 1
 export_gradcam_on_eval: false
 gradcam_target_layer: "auto" # "auto" will select the final fusion block
+
+# Description-aligned auxiliary learning
+description_aux:
+  enabled: true
+  clip_model_name: "openai/clip-vit-large-patch14"
+  clip_max_length: 77
+  clip_batch_size: 8
+  clip_chunk_overlap_tokens: 16
+  hidden_dim: 512
+  mix_weight: 0.35
+  visual_loss_weight: 0.50
+  description_loss_weight: 0.35
+  align_loss_weight: 0.15
+  logit_scale_init: 14.2857

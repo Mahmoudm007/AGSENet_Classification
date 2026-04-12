@@ -54,6 +54,16 @@ class MetricTracker:
             'macro_f1': f1,
             'weighted_f1': weighted_f1
         }
+
+        if self.all_probs and self.class_names:
+            y_prob = np.array(self.all_probs)
+            num_classes = y_prob.shape[1]
+            for k in [2, 3]:
+                if num_classes < k:
+                    continue
+                topk = np.argpartition(y_prob, -k, axis=1)[:, -k:]
+                topk_correct = [int(label in preds) for label, preds in zip(y_true, topk)]
+                metrics[f'top_{k}_acc'] = float(np.mean(topk_correct))
         
         return metrics
         

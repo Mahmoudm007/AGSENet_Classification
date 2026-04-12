@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 
-def compute_class_weights(class_frequencies, mode='inverse'):
+def compute_class_weights(class_frequencies, mode='inverse', beta=0.9999):
     """
     Computes class weights from class training frequencies.
     """
@@ -22,6 +22,10 @@ def compute_class_weights(class_frequencies, mode='inverse'):
         weights = median / freq
     elif mode == 'normalized_inverse':
         weights = 1.0 / freq
+        weights = weights / np.sum(weights) * len(freq)
+    elif mode == 'effective_num':
+        effective_num = 1.0 - np.power(beta, freq)
+        weights = (1.0 - beta) / np.maximum(effective_num, 1e-12)
         weights = weights / np.sum(weights) * len(freq)
     else:
         raise ValueError(f"Unknown weight mode: {mode}")
@@ -64,7 +68,11 @@ def get_loss_function(config, class_frequencies=None):
     if config.get("use_class_weights", False) and class_frequencies is not None:
         mode = config.get("class_weight_mode", "inverse")
         if mode != "manual":
-            weights = compute_class_weights(class_frequencies, mode=mode)
+            weights = compute_class_weights(
+                class_frequencies,
+                mode=mode,
+                beta=float(config.get("class_weight_beta", 0.9999)),
+            )
             print(f"Computed Class Weights ({mode}): {weights.tolist()}")
     
     if loss_name in ["cross_entropy", "weighted_cross_entropy"]:

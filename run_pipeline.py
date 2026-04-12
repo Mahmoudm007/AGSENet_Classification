@@ -68,7 +68,9 @@ def main():
         "--export-encoder-gradcam",
         "--export-decoder-gradcam",
         "--export-roc",
-        "--export-recall-confidence"
+        "--export-pr",
+        "--export-topk",
+        "--export-calibration"
     ])
 
     print("\n" + "=" * 60)
