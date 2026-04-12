@@ -43,7 +43,7 @@ def create_output_dirs(base_dir, split):
     out_dir = Path(base_dir) / 'visualizations' / split
     dirs = {
         'base': out_dir,
-        'image_titles': out_dir / 'image_titles',
+        'predictions': out_dir / 'predictions',
         'roc': out_dir / 'roc',
         'recall_conf': out_dir / 'recall_confidence',
         'enc_base': out_dir / 'encoder_gradcam',
@@ -190,9 +190,10 @@ def main():
     test_ratio = config.get('test_split_ratio', 0.1)
     transform = get_transforms(config['image_size'], split=args.split)
     
+    merge_classes = config.get('merge_classes', True)
+    
     dataset = RoadPondingDataset(
-        config['data_path'], transform=transform, split=args.split, 
-        val_ratio=val_ratio, test_ratio=test_ratio
+        config['data_path'], transform=transform, split=args.split, merge_classes=merge_classes
     )
     dataloader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=config.get('num_workers', 4))
     inv_transform = get_inverse_transform()
@@ -219,7 +220,7 @@ def main():
     num_processed = 0
     tqdm_loader = tqdm(dataloader, desc=f"Processing {args.split}")
     
-    for i, (inputs, targets) in enumerate(tqdm_loader):
+    for i, (inputs, targets, paths) in enumerate(tqdm_loader):
         if args.max_images and num_processed >= args.max_images:
             break
             
@@ -246,7 +247,7 @@ def main():
         rgb_img = np.float32(img_denorm) / 255.0
         orig_uint8 = np.uint8(255 * rgb_img)
         
-        base_name = f"idx{i:05d}_T-{true_name}_P-{pred_name}"
+        base_name = f"idx{i:05d}_T-{true_name}_P-{pred_name}_Conf-{conf:.2f}"
         
         # 1. Titled Image Panels
         if args.export_image_panels:
@@ -259,7 +260,7 @@ def main():
             ax.set_title(f"GT: {true_name} | Pred: {pred_name} | Conf: {conf:.2f}",
                          fontsize=14, color=color, pad=15)
             ax.axis('off')
-            title_path = dirs['image_titles'] / f"{base_name}_titled.png"
+            title_path = dirs['predictions'] / f"{base_name}.png"
             plt.savefig(title_path, bbox_inches='tight', dpi=150)
             plt.close(fig)
             
@@ -312,7 +313,7 @@ def main():
             'confidence': f"{conf:.4f}",
             'correct': is_correct,
             'checkpoint_used': str(ckpt_path),
-            'titled_image': str(dirs['image_titles'] / f"{base_name}_titled.png") if args.export_image_panels else None,
+            'titled_image': str(dirs['predictions'] / f"{base_name}.png") if args.export_image_panels else None,
             'enc_panel': str(dirs['enc_base'] / 'combined' / f"{base_name}_encoder_panel.png") if args.export_encoder_gradcam else None,
             'dec_panel': str(dirs['dec_base'] / 'combined' / f"{base_name}_decoder_panel.png") if args.export_decoder_gradcam else None,
         })

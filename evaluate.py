@@ -4,6 +4,9 @@ import yaml
 import torch
 import numpy as np
 import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.manifold import TSNE
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -26,8 +29,13 @@ def evaluate(model, dataloader, device, class_names):
     model.eval()
     metric_tracker = MetricTracker(class_names=class_names)
     
+    features = []
+    def hook(module, input, output):
+        features.append(input[0].detach().cpu().numpy())
+    handle = model.classifier[0].register_forward_hook(hook)
+    
     pbar = tqdm(dataloader, desc="Evaluating")
-    for inputs, targets in pbar:
+    for inputs, targets, paths in pbar:
         inputs, targets = inputs.to(device), targets.to(device)
         
         with torch.amp.autocast('cuda'):
@@ -37,7 +45,61 @@ def evaluate(model, dataloader, device, class_names):
         preds = torch.argmax(probs, dim=1)
         metric_tracker.update(preds, targets, probs)
         
-    return metric_tracker
+    handle.remove()
+    all_features = np.concatenate(features, axis=0)
+    return metric_tracker, all_features
+
+def plot_tsne(features, targets, preds, class_names, out_dir):
+    print("Computing t-SNE for clustering plot...")
+    perplexity = min(30, max(5, len(features) // 3))
+    tsne = TSNE(n_components=2, perplexity=perplexity, random_state=42)
+    embedded = tsne.fit_transform(features)
+    
+    # 1. Plot all classes together
+    plt.figure(figsize=(12, 10))
+    correct_idx = (targets == preds)
+    incorrect_idx = (targets != preds)
+    
+    palette = sns.color_palette("husl", len(class_names))
+    
+    for i, class_name in enumerate(class_names):
+        c_idx = correct_idx & (targets == i)
+        plt.scatter(embedded[c_idx, 0], embedded[c_idx, 1], label=f'{class_name} (Correct)',
+                    color=palette[i], alpha=0.7, marker='o', s=50)
+        
+        i_idx = incorrect_idx & (targets == i)
+        if np.any(i_idx):
+            plt.scatter(embedded[i_idx, 0], embedded[i_idx, 1], label=f'{class_name} (Incorrect)',
+                        color=palette[i], alpha=1.0, marker='X', s=100, edgecolor='black')
+            
+    plt.title('t-SNE Clustering (All Classes)', fontsize=16)
+    plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+    plt.tight_layout()
+    plt.savefig(os.path.join(out_dir, 'feature_clusters_tsne_all.png'), dpi=300)
+    plt.close()
+    
+    # 2. Plot between 2 classes per image
+    import itertools
+    for combo in itertools.combinations(range(len(class_names)), 2):
+        c1, c2 = combo
+        plt.figure(figsize=(10, 8))
+        
+        for i in [c1, c2]:
+            c_idx = correct_idx & (targets == i)
+            if np.any(c_idx):
+                plt.scatter(embedded[c_idx, 0], embedded[c_idx, 1], label=f'{class_names[i]} (Correct)',
+                            color=palette[i], alpha=0.7, marker='o', s=60)
+            
+            i_idx = incorrect_idx & (targets == i)
+            if np.any(i_idx):
+                plt.scatter(embedded[i_idx, 0], embedded[i_idx, 1], label=f'{class_names[i]} (Incorrect)',
+                            color=palette[i], alpha=1.0, marker='X', s=120, edgecolor='black')
+                
+        plt.title(f't-SNE: {class_names[c1]} vs {class_names[c2]}', fontsize=16)
+        plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+        plt.tight_layout()
+        plt.savefig(os.path.join(out_dir, f'feature_clusters_tsne_{c1}_vs_{c2}.png'), dpi=300)
+        plt.close()
 
 def main():
     args = parse_args()
@@ -51,11 +113,10 @@ def main():
     # Dataset
     data_path = config['data_path']
     img_size = config['image_size']
-    val_ratio = config.get('val_split_ratio', 0.2)
-    test_ratio = config.get('test_split_ratio', 0.1)
+    merge_classes = config.get('merge_classes', True)
     
     transform = get_transforms(img_size, split=args.split)
-    dataset = RoadPondingDataset(data_path, transform=transform, split=args.split, val_ratio=val_ratio, test_ratio=test_ratio)
+    dataset = RoadPondingDataset(data_path, transform=transform, split=args.split, merge_classes=merge_classes)
     
     dataloader = DataLoader(
         dataset, batch_size=config['batch_size'], shuffle=False, 
@@ -76,7 +137,7 @@ def main():
     model.load_state_dict(state_dict)
     
     # Evaluate
-    tracker = evaluate(model, dataloader, device, dataset.classes)
+    tracker, features = evaluate(model, dataloader, device, dataset.classes)
     
     metrics = tracker.compute()
     print("\n--- Evaluation Results ---")
@@ -91,9 +152,24 @@ def main():
     cm_df = pd.DataFrame(cm, index=dataset.classes, columns=dataset.classes)
     out_dir = config['output_dir']
     os.makedirs(out_dir, exist_ok=True)
+    
     cm_csv_path = os.path.join(out_dir, f"confusion_matrix_{args.split}.csv")
     cm_df.to_csv(cm_csv_path)
+    
+    plt.figure(figsize=(10, 8))
+    sns.heatmap(cm_df, annot=True, fmt='d', cmap='Blues')
+    plt.title(f'Confusion Matrix ({args.split})')
+    plt.ylabel('True Class')
+    plt.xlabel('Predicted Class')
+    plt.savefig(os.path.join(out_dir, f"confusion_matrix_{args.split}.png"), dpi=300)
+    plt.close()
+    
     print(f"Confusion matrix saved to {cm_csv_path}")
+    
+    # TSNE Plot
+    targets_np = np.array(tracker.all_targets)
+    preds_np = np.array(tracker.all_preds)
+    plot_tsne(features, targets_np, preds_np, dataset.classes, out_dir)
     
     # Save base predictions
     results_df = pd.DataFrame({

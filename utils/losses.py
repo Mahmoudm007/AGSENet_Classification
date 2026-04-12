@@ -13,6 +13,10 @@ def compute_class_weights(class_frequencies, mode='inverse'):
     
     if mode == 'inverse':
         weights = 1.0 / freq
+    elif mode == 'balanced':
+        total_samples = np.sum(freq)
+        num_classes = len(freq)
+        weights = total_samples / (num_classes * freq)
     elif mode == 'median_frequency':
         median = np.median(freq)
         weights = median / freq

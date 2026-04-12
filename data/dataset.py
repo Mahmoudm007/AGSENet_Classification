@@ -12,65 +12,60 @@ class RoadPondingDataset(Dataset):
     Expects a folder structure where subdirectories are class names.
     Automatically handles splitting if specified.
     """
-    def __init__(self, root_dir, transform=None, split='train', val_ratio=0.2, test_ratio=0.1, seed=42):
+    def __init__(self, root_dir, transform=None, split='train', merge_classes=True, **kwargs):
         self.root_dir = Path(root_dir)
         self.transform = transform
         self.split = split
+        self.merge_classes = merge_classes
         
-        if not self.root_dir.exists():
-            raise FileNotFoundError(f"Directory {self.root_dir} not found.")
+        # Determine the split directory (test uses val as requested)
+        split_dir_name = 'val' if self.split == 'test' else self.split
+        self.split_dir = self.root_dir / split_dir_name
+        
+        if not self.split_dir.exists():
+            raise FileNotFoundError(f"Directory {self.split_dir} not found.")
 
-        # Discover classes
-        self.classes = sorted([d.name for d in self.root_dir.iterdir() if d.is_dir()])
+        # Discover classes from directory names
+        raw_classes = sorted([d.name for d in self.split_dir.iterdir() if d.is_dir()])
+        
+        # Remap classes if merge_classes is used
+        if self.merge_classes:
+            # We want to map:
+            # "1 Centre - Partly", "2 Two Track - Partly", "3 One Track - Partly" -> "1 Partly"
+            # "0 Bare" -> "0 Bare"
+            # "4 Fully" -> "2 Fully"
+            self.classes = ["0 Bare", "1 Partly", "2 Fully"]
+            
+            raw_to_mapped = {}
+            for rc in raw_classes:
+                rc_lower = rc.lower()
+                if "partly" in rc_lower:
+                    raw_to_mapped[rc] = "1 Partly"
+                elif "bare" in rc_lower:
+                    raw_to_mapped[rc] = "0 Bare"
+                elif "fully" in rc_lower:
+                    raw_to_mapped[rc] = "2 Fully"
+                else:
+                    raw_to_mapped[rc] = rc # Fallback
+        else:
+            self.classes = raw_classes
+            raw_to_mapped = {rc: rc for rc in raw_classes}
+
         self.class_to_idx = {cls_name: i for i, cls_name in enumerate(self.classes)}
         self.idx_to_class = {i: cls_name for cls_name, i in self.class_to_idx.items()}
 
         # Collect all images
-        all_samples = []
-        for cls_name in self.classes:
-            cls_dir = self.root_dir / cls_name
+        self.samples = []
+        for rc in raw_classes:
+            cls_dir = self.split_dir / rc
+            mapped_cls = raw_to_mapped[rc]
+            mapped_idx = self.class_to_idx[mapped_cls]
             for img_path in cls_dir.glob("*.*"):
                 if img_path.suffix.lower() in ['.jpg', '.jpeg', '.png', '.bmp', '.webp']:
-                    all_samples.append((str(img_path), self.class_to_idx[cls_name]))
+                    self.samples.append((str(img_path), mapped_idx))
 
-        if not all_samples:
-            raise ValueError(f"No valid images found in {self.root_dir}")
-
-        # Stratified Splitting
-        labels = [s[1] for s in all_samples]
-        
-        # Train / Temp split
-        temp_ratio = val_ratio + test_ratio
-        if temp_ratio > 0:
-            train_samples, temp_samples, train_labels, temp_labels = train_test_split(
-                all_samples, labels, test_size=temp_ratio, stratify=labels, random_state=seed
-            )
-            
-            if test_ratio > 0 and val_ratio > 0:
-                rel_test_ratio = test_ratio / temp_ratio
-                val_samples, test_samples = train_test_split(
-                    temp_samples, test_size=rel_test_ratio, stratify=temp_labels, random_state=seed
-                )
-            elif val_ratio > 0:
-                val_samples = temp_samples
-                test_samples = []
-            else:
-                test_samples = temp_samples
-                val_samples = []
-        else:
-            train_samples = all_samples
-            val_samples = []
-            test_samples = []
-
-        # Assign split
-        if self.split == 'train':
-            self.samples = train_samples
-        elif self.split == 'val':
-            self.samples = val_samples
-        elif self.split == 'test':
-            self.samples = test_samples
-        else:
-            raise ValueError(f"Invalid split {split}. Must be train, val, or test.")
+        if not self.samples:
+            raise ValueError(f"No valid images found in {self.split_dir}")
 
         print(f"[{split.upper()}] Loaded {len(self.samples)} images from {len(self.classes)} classes.")
         self.print_class_distribution()
@@ -105,4 +100,4 @@ class RoadPondingDataset(Dataset):
         if self.transform:
             image = self.transform(image)
 
-        return image, label
+        return image, label, img_path
