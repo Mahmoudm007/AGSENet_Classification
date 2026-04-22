@@ -6,7 +6,7 @@ import torch
 
 from models.agsenet_classifier import AGSENetClassifier
 from .class_descriptions import get_class_description, get_class_display_name
-from .clip_text import encode_texts_with_clip
+from .tfidf_text import encode_texts_with_tfidf
 
 
 def get_description_aux_config(config: Dict[str, Any]) -> Dict[str, Any]:
@@ -63,7 +63,7 @@ def resolve_description_embeddings(
         return embeddings, {
             "enabled": True,
             "source": "checkpoint",
-            "clip_model_name": aux_cfg.get("clip_model_name"),
+            "text_feature_extractor": aux_cfg.get("text_feature_extractor", "tfidf"),
             "class_names": class_names,
         }
 
@@ -71,24 +71,33 @@ def resolve_description_embeddings(
         return None, {"enabled": False, "source": "disabled", "class_names": class_names}
 
     prompts = _build_description_prompts(class_names)
-    embeddings, clip_meta = encode_texts_with_clip(
+    ngram_range = aux_cfg.get("tfidf_ngram_range", [1, 2])
+    embeddings, text_meta = encode_texts_with_tfidf(
         prompts,
-        model_name=aux_cfg.get("clip_model_name", "openai/clip-vit-large-patch14"),
-        device=device,
-        max_length=int(aux_cfg.get("clip_max_length", 77)),
-        batch_size=int(aux_cfg.get("clip_batch_size", 8)),
-        overlap_tokens=int(aux_cfg.get("clip_chunk_overlap_tokens", 16)),
+        max_features=int(aux_cfg.get("tfidf_max_features", 4000)),
+        ngram_range=(int(ngram_range[0]), int(ngram_range[1])),
+        use_svd=bool(aux_cfg.get("tfidf_use_svd", False)),
+        svd_dim=int(aux_cfg.get("tfidf_svd_dim", 128)),
+        seed=int(config.get("seed", 42)),
+        top_k_terms=int(aux_cfg.get("tfidf_top_terms", 12)),
+        use_char_ngrams=bool(aux_cfg.get("tfidf_use_char_ngrams", True)),
+        char_max_features=int(aux_cfg.get("tfidf_char_max_features", 2000)),
+        char_ngram_range=(
+            int(aux_cfg.get("tfidf_char_ngram_range", [3, 5])[0]),
+            int(aux_cfg.get("tfidf_char_ngram_range", [3, 5])[1]),
+        ),
+        sublinear_tf=bool(aux_cfg.get("tfidf_sublinear_tf", True)),
     )
     metadata = {
         "enabled": True,
-        "source": "clip_encoder",
+        "source": "tfidf_vectorizer",
+        "text_feature_extractor": aux_cfg.get("text_feature_extractor", "tfidf"),
         "class_names": class_names,
         "display_names": [get_class_display_name(name) for name in class_names],
         "descriptions": {name: get_class_description(name) for name in class_names},
         "prompts": prompts,
-        "clip_model_name": aux_cfg.get("clip_model_name", "openai/clip-vit-large-patch14"),
     }
-    metadata.update(clip_meta)
+    metadata.update(text_meta)
     return embeddings, metadata
 
 
@@ -117,6 +126,8 @@ def build_model(
         description_mix_weight=float(aux_cfg.get("mix_weight", 0.35)),
         description_hidden_dim=int(aux_cfg.get("hidden_dim", 512)),
         description_logit_scale_init=float(aux_cfg.get("logit_scale_init", 14.2857)),
+        scale_attention_heads=int(aux_cfg.get("scale_attention_heads", 4)),
+        fusion_gate_hidden_dim=int(aux_cfg.get("fusion_gate_hidden_dim", 256)),
     ).to(device)
     return model, text_metadata
 

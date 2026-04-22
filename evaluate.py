@@ -91,7 +91,11 @@ def evaluate(model, dataloader, device, class_names):
         probs = torch.softmax(outputs, dim=1)
         preds = torch.argmax(probs, dim=1)
         tracker.update(preds, targets, probs)
-        pooled_features.append(aux["pooled_features"].detach().cpu().numpy())
+        pooled_features.append(
+            aux.get("enhanced_pooled_features", aux["pooled_features"]).detach().cpu().numpy()
+        )
+        visual_probs = torch.softmax(aux["visual_logits"], dim=1)
+        text_probs = torch.softmax(aux["description_logits"], dim=1)
 
         topk_values, topk_indices = torch.topk(probs, k=min(3, probs.shape[1]), dim=1)
         for idx in range(inputs.shape[0]):
@@ -103,6 +107,9 @@ def evaluate(model, dataloader, device, class_names):
                 "pred_class": class_names[int(preds[idx].item())],
                 "confidence": float(probs[idx, preds[idx]].item()),
                 "correct": bool(preds[idx].item() == targets[idx].item()),
+                "visual_pred": class_names[int(torch.argmax(visual_probs[idx]).item())],
+                "text_pred": class_names[int(torch.argmax(text_probs[idx]).item())],
+                "fusion_gate": float(aux["fusion_gate"][idx].item()) if "fusion_gate" in aux else None,
             }
             for class_idx, class_name in enumerate(class_names):
                 row[f"prob_{class_name}"] = float(probs[idx, class_idx].item())

@@ -24,6 +24,7 @@ from utils import (
     get_display_names,
     load_checkpoint_payload,
     load_model_weights,
+    save_post_training_multimodal_analysis,
 )
 
 from pytorch_grad_cam import GradCAM
@@ -324,6 +325,12 @@ def main():
         class_names = dataset.classes
     display_names = get_display_names(class_names)
     dataloader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=runtime_config.get("num_workers", 4))
+    analysis_loader = DataLoader(
+        dataset,
+        batch_size=runtime_config.get("batch_size", 8),
+        shuffle=False,
+        num_workers=runtime_config.get("num_workers", 4),
+    )
     inv_transform = get_inverse_transform()
 
     dirs = create_output_dirs(config["output_dir"], args.split, class_names)
@@ -444,6 +451,15 @@ def main():
     if args.export_calibration:
         plot_calibration(y_true_np, y_probs_np, dirs["plots"])
         plot_normalized_confusion(y_true_np, y_pred_np, display_names, dirs["plots"])
+
+    save_post_training_multimodal_analysis(
+        model,
+        analysis_loader,
+        device,
+        display_names,
+        config["output_dir"],
+        split=args.split,
+    )
 
     pd.DataFrame(metadata).to_csv(dirs["plots"] / f"metadata_{args.split}.csv", index=False)
     print(f"Completed. Outputs saved under {Path(config['output_dir']).resolve()}")

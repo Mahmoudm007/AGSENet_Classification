@@ -1,6 +1,6 @@
 # AGSENet: Road Ponding Classification Adaptation
 
-This repository implements a **multi-class image classification** model adapted from the original semantic segmentation architecture described in the paper *"AGSENet: A Robust Road Ponding Detection Method for Proactive Traffic Safety"*.
+This repository implements a **multi-class image classification** model adapted from the original semantic segmentation architecture describedin the paper *"AGSENet: A Robust Road Ponding Detection Method for Proactive Traffic Safety"*.
 
 While the original paper focused on dense pixel-level delineation of water patches, this implementation captures the architectural essence of AGSENet—specifically its powerful saliency extraction and multi-scale feature enhancement—and explicitly repurposes it for **5-class road surface condition recognition**.
 
@@ -16,7 +16,7 @@ While the original paper focused on dense pixel-level delineation of water patch
 2. **Top-Down Fusion Neck**: Instead of an expansive decoder, the SSIE fusion modules act as a lightweight, top-down feature refining neck. Adjacent scales are fused (stage 6 -> stage 5 -> ...).
 3. **Global Multi-Scale Output**: The outputs of deeper scales (f3, f4, f5, f6) undergo Adaptive Average *and* Max Pooling, are concatenated, and map through a lightweight MLP.
 4. **Imbalance-Aware CrossEntropy Loss**: The pipeline was switched from dense maps to a robust sequence of image-label metrics (`WeightedCrossEntropy` and `Multiclass FocalLoss`).
-5. **Description-Aligned Auxiliary Learning**: The AGSENet classifier now supports a frozen CLIP text branch that encodes the full class descriptions, aligns image embeddings with those class-description prototypes, and mixes text-similarity logits with the main visual classifier.
+5. **Description-Aligned Auxiliary Learning**: The AGSENet classifier now supports a TF-IDF text branch built from the full class descriptions, aligns image embeddings with those class-description prototypes, and mixes text-similarity logits with the main visual classifier.
 
 ## Expected Directory Structure
 
@@ -86,6 +86,7 @@ We provide a dedicated `visualize.py` script to generate comprehensive, publicat
 2. **Encoder Stage Heatmaps**: A standalone figure visualizing the CNN feature activations out of every individual encoder stage (Encoder 1 through 6).
 3. **Decoder/Fusion Stage Heatmaps**: A standalone figure visualizing the top-down feature fusion process through the SSIE modules.
 4. **ROC, Precision-Recall, Calibration, and Top-K Panels**: Multiclass ROC/AUC, precision-recall curves, confidence calibration, normalized confusion, and per-image top-k prediction panels.
+5. **Multimodal Analysis**: Before training, during training, and after training the pipeline saves image-only, text-only, and fused-view diagnostics under `outputs/multimodal_analysis/`.
 
 ```bash
 # Export all available components on the validation set

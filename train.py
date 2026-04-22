@@ -14,18 +14,27 @@ from torch.utils.data import DataLoader, WeightedRandomSampler
 from tqdm import tqdm
 
 from data.dataset import RoadPondingDataset
-from data.transforms import get_transforms
+from data.transforms import get_inverse_transform, get_transforms
 from utils import (
     AverageMeter,
     CSVLogger,
     MetricTracker,
     append_parameter_reports,
     build_model,
+    compute_multimodal_batch_stats,
     compute_class_weights,
     description_aux_enabled,
     get_display_names,
     get_loss_function,
+    make_fixed_sample_batch,
+    prototype_separation_loss,
+    save_mix_snapshot,
+    save_post_training_multimodal_analysis,
+    save_text_feature_overview,
+    save_training_dynamics_plots,
     set_seed,
+    supervised_contrastive_loss,
+    symmetric_kl_divergence,
 )
 
 
@@ -61,13 +70,55 @@ def build_train_sampler(dataset, config) -> Optional[WeightedRandomSampler]:
     return sampler
 
 
+def build_scheduler(optimizer, config):
+    scheduler_type = config.get("scheduler_type", "cosine")
+    epochs = int(config["epochs"])
+    min_learning_rate = float(config.get("min_learning_rate", 1e-6))
+
+    if scheduler_type == "warmup_cosine":
+        warmup_epochs = max(1, int(config.get("warmup_epochs", 5)))
+        warmup = torch.optim.lr_scheduler.LinearLR(
+            optimizer,
+            start_factor=float(config.get("warmup_start_factor", 0.1)),
+            total_iters=warmup_epochs,
+        )
+        cosine = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer,
+            T_max=max(1, epochs - warmup_epochs),
+            eta_min=min_learning_rate,
+        )
+        return torch.optim.lr_scheduler.SequentialLR(
+            optimizer,
+            schedulers=[warmup, cosine],
+            milestones=[warmup_epochs],
+        )
+
+    if scheduler_type == "cosine":
+        return torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer,
+            T_max=epochs,
+            eta_min=min_learning_rate,
+        )
+
+    return torch.optim.lr_scheduler.StepLR(
+        optimizer,
+        step_size=int(config.get("step_scheduler_step_size", 20)),
+        gamma=float(config.get("step_scheduler_gamma", 0.1)),
+    )
+
+
 def compute_losses(config, criterion, logits, aux_outputs, targets):
     total_loss = criterion(logits, targets)
     loss_items = {
         "combined_cls_loss": float(total_loss.detach().item()),
         "visual_cls_loss": 0.0,
         "description_cls_loss": 0.0,
+        "enhanced_visual_loss": 0.0,
         "align_loss": 0.0,
+        "consistency_loss": 0.0,
+        "contrastive_loss": 0.0,
+        "prototype_separation_loss": 0.0,
+        "fusion_gate": 0.0,
     }
 
     if aux_outputs is None or "description_logits" not in aux_outputs:
@@ -77,23 +128,55 @@ def compute_losses(config, criterion, logits, aux_outputs, targets):
     visual_weight = float(aux_cfg.get("visual_loss_weight", 0.5))
     description_weight = float(aux_cfg.get("description_loss_weight", 0.35))
     align_weight = float(aux_cfg.get("align_loss_weight", 0.15))
+    enhanced_visual_weight = float(aux_cfg.get("enhanced_visual_loss_weight", 0.2))
+    consistency_weight = float(aux_cfg.get("consistency_loss_weight", 0.1))
+    contrastive_weight = float(aux_cfg.get("contrastive_loss_weight", 0.05))
+    prototype_weight = float(aux_cfg.get("prototype_separation_weight", 0.05))
 
     visual_cls_loss = criterion(aux_outputs["visual_logits"], targets)
     description_cls_loss = criterion(aux_outputs["description_logits"], targets)
+    enhanced_visual_logits = aux_outputs.get("enhanced_visual_logits")
+    if enhanced_visual_logits is not None:
+        enhanced_visual_loss = criterion(enhanced_visual_logits, targets)
+    else:
+        enhanced_visual_loss = visual_cls_loss.new_tensor(0.0)
     target_descriptions = aux_outputs["description_embedding_bank"].index_select(0, targets)
     align_loss = 1.0 - (aux_outputs["image_embedding"] * target_descriptions).sum(dim=1).mean()
+    consistency_loss = symmetric_kl_divergence(
+        aux_outputs["visual_logits"],
+        aux_outputs["description_logits"],
+        temperature=float(aux_cfg.get("consistency_temperature", 1.5)),
+    )
+    contrastive_loss = supervised_contrastive_loss(
+        aux_outputs["image_embedding"],
+        targets,
+        temperature=float(aux_cfg.get("contrastive_temperature", 0.1)),
+    )
+    proto_loss = prototype_separation_loss(
+        aux_outputs["description_embedding_bank"],
+        margin=float(aux_cfg.get("prototype_margin", 0.2)),
+    )
 
     total_loss = (
         total_loss
         + (visual_weight * visual_cls_loss)
         + (description_weight * description_cls_loss)
+        + (enhanced_visual_weight * enhanced_visual_loss)
         + (align_weight * align_loss)
+        + (consistency_weight * consistency_loss)
+        + (contrastive_weight * contrastive_loss)
+        + (prototype_weight * proto_loss)
     )
     loss_items.update(
         {
             "visual_cls_loss": float(visual_cls_loss.detach().item()),
             "description_cls_loss": float(description_cls_loss.detach().item()),
+            "enhanced_visual_loss": float(enhanced_visual_loss.detach().item()),
             "align_loss": float(align_loss.detach().item()),
+            "consistency_loss": float(consistency_loss.detach().item()),
+            "contrastive_loss": float(contrastive_loss.detach().item()),
+            "prototype_separation_loss": float(proto_loss.detach().item()),
+            "fusion_gate": float(aux_outputs.get("fusion_gate", torch.tensor(0.0, device=logits.device)).mean().detach().item()),
         }
     )
     return total_loss, loss_items
@@ -111,7 +194,30 @@ def train_epoch(model, dataloader, criterion, optimizer, scaler, device, metric_
     combined_losses = AverageMeter()
     visual_losses = AverageMeter()
     description_losses = AverageMeter()
+    enhanced_visual_losses = AverageMeter()
     alignment_losses = AverageMeter()
+    consistency_losses = AverageMeter()
+    contrastive_losses = AverageMeter()
+    prototype_losses = AverageMeter()
+    fusion_gate_meter = AverageMeter()
+    aux_meters = {
+        "visual_acc": AverageMeter(),
+        "description_acc": AverageMeter(),
+        "branch_agreement": AverageMeter(),
+        "fused_visual_agreement": AverageMeter(),
+        "fused_text_agreement": AverageMeter(),
+        "enhancement_agreement": AverageMeter(),
+        "base_visual_acc": AverageMeter(),
+        "enhanced_visual_acc": AverageMeter(),
+        "true_visual_prob": AverageMeter(),
+        "true_description_prob": AverageMeter(),
+        "true_fused_prob": AverageMeter(),
+        "true_text_similarity": AverageMeter(),
+        "top_text_similarity": AverageMeter(),
+        "avg_fusion_gate": AverageMeter(),
+        "gate_correct_gap": AverageMeter(),
+    }
+    grad_clip_norm = float(config.get("grad_clip_norm", 1.0))
 
     pbar = tqdm(dataloader, desc="Training")
     for inputs, targets, _ in pbar:
@@ -130,7 +236,8 @@ def train_epoch(model, dataloader, criterion, optimizer, scaler, device, metric_
 
         scaler.scale(loss).backward()
         scaler.unscale_(optimizer)
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        if grad_clip_norm > 0:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip_norm)
         scaler.step(optimizer)
         scaler.update()
 
@@ -138,7 +245,16 @@ def train_epoch(model, dataloader, criterion, optimizer, scaler, device, metric_
         combined_losses.update(loss_items["combined_cls_loss"], inputs.size(0))
         visual_losses.update(loss_items["visual_cls_loss"], inputs.size(0))
         description_losses.update(loss_items["description_cls_loss"], inputs.size(0))
+        enhanced_visual_losses.update(loss_items["enhanced_visual_loss"], inputs.size(0))
         alignment_losses.update(loss_items["align_loss"], inputs.size(0))
+        consistency_losses.update(loss_items["consistency_loss"], inputs.size(0))
+        contrastive_losses.update(loss_items["contrastive_loss"], inputs.size(0))
+        prototype_losses.update(loss_items["prototype_separation_loss"], inputs.size(0))
+        fusion_gate_meter.update(loss_items["fusion_gate"], inputs.size(0))
+        batch_stats = compute_multimodal_batch_stats(outputs, aux_outputs, targets)
+        for key, value in batch_stats.items():
+            if key in aux_meters:
+                aux_meters[key].update(value, inputs.size(0))
 
         probs = torch.softmax(outputs, dim=1)
         preds = torch.argmax(probs, dim=1)
@@ -155,7 +271,14 @@ def train_epoch(model, dataloader, criterion, optimizer, scaler, device, metric_
     metrics["combined_cls_loss"] = combined_losses.avg
     metrics["visual_cls_loss"] = visual_losses.avg
     metrics["description_cls_loss"] = description_losses.avg
+    metrics["enhanced_visual_loss"] = enhanced_visual_losses.avg
     metrics["align_loss"] = alignment_losses.avg
+    metrics["consistency_loss"] = consistency_losses.avg
+    metrics["contrastive_loss"] = contrastive_losses.avg
+    metrics["prototype_separation_loss"] = prototype_losses.avg
+    metrics["fusion_gate"] = fusion_gate_meter.avg
+    for key, meter in aux_meters.items():
+        metrics[key] = meter.avg
     return metrics
 
 
@@ -168,7 +291,29 @@ def validate_epoch(model, dataloader, criterion, device, metric_tracker, epoch, 
     combined_losses = AverageMeter()
     visual_losses = AverageMeter()
     description_losses = AverageMeter()
+    enhanced_visual_losses = AverageMeter()
     alignment_losses = AverageMeter()
+    consistency_losses = AverageMeter()
+    contrastive_losses = AverageMeter()
+    prototype_losses = AverageMeter()
+    fusion_gate_meter = AverageMeter()
+    aux_meters = {
+        "visual_acc": AverageMeter(),
+        "description_acc": AverageMeter(),
+        "branch_agreement": AverageMeter(),
+        "fused_visual_agreement": AverageMeter(),
+        "fused_text_agreement": AverageMeter(),
+        "enhancement_agreement": AverageMeter(),
+        "base_visual_acc": AverageMeter(),
+        "enhanced_visual_acc": AverageMeter(),
+        "true_visual_prob": AverageMeter(),
+        "true_description_prob": AverageMeter(),
+        "true_fused_prob": AverageMeter(),
+        "true_text_similarity": AverageMeter(),
+        "top_text_similarity": AverageMeter(),
+        "avg_fusion_gate": AverageMeter(),
+        "gate_correct_gap": AverageMeter(),
+    }
     sample_losses = []
 
     pbar = tqdm(dataloader, desc="Validation")
@@ -189,7 +334,16 @@ def validate_epoch(model, dataloader, criterion, device, metric_tracker, epoch, 
         combined_losses.update(loss_items["combined_cls_loss"], inputs.size(0))
         visual_losses.update(loss_items["visual_cls_loss"], inputs.size(0))
         description_losses.update(loss_items["description_cls_loss"], inputs.size(0))
+        enhanced_visual_losses.update(loss_items["enhanced_visual_loss"], inputs.size(0))
         alignment_losses.update(loss_items["align_loss"], inputs.size(0))
+        consistency_losses.update(loss_items["consistency_loss"], inputs.size(0))
+        contrastive_losses.update(loss_items["contrastive_loss"], inputs.size(0))
+        prototype_losses.update(loss_items["prototype_separation_loss"], inputs.size(0))
+        fusion_gate_meter.update(loss_items["fusion_gate"], inputs.size(0))
+        batch_stats = compute_multimodal_batch_stats(outputs, aux_outputs, targets)
+        for key, value in batch_stats.items():
+            if key in aux_meters:
+                aux_meters[key].update(value, inputs.size(0))
 
         probs = torch.softmax(outputs, dim=1)
         preds = torch.argmax(probs, dim=1)
@@ -226,7 +380,14 @@ def validate_epoch(model, dataloader, criterion, device, metric_tracker, epoch, 
     metrics["combined_cls_loss"] = combined_losses.avg
     metrics["visual_cls_loss"] = visual_losses.avg
     metrics["description_cls_loss"] = description_losses.avg
+    metrics["enhanced_visual_loss"] = enhanced_visual_losses.avg
     metrics["align_loss"] = alignment_losses.avg
+    metrics["consistency_loss"] = consistency_losses.avg
+    metrics["contrastive_loss"] = contrastive_losses.avg
+    metrics["prototype_separation_loss"] = prototype_losses.avg
+    metrics["fusion_gate"] = fusion_gate_meter.avg
+    for key, meter in aux_meters.items():
+        metrics[key] = meter.avg
     return metrics
 
 
@@ -309,6 +470,29 @@ def main():
 
     model, text_metadata = build_model(config, train_dataset.classes, device)
     save_description_metadata(config["output_dir"], text_metadata, train_dataset.classes)
+    inverse_transform = get_inverse_transform()
+    fixed_batch = None
+    aux_cfg = config.get("description_aux", {})
+    if description_aux_enabled(config):
+        save_text_feature_overview(
+            config["output_dir"],
+            train_dataset.classes,
+            text_metadata,
+            model.description_embeddings.detach().cpu(),
+        )
+        fixed_batch = make_fixed_sample_batch(
+            val_loader,
+            max_samples=int(aux_cfg.get("snapshot_num_images", 12)),
+        )
+        save_mix_snapshot(
+            model,
+            fixed_batch,
+            device,
+            train_dataset.classes,
+            inverse_transform,
+            Path(config["output_dir"]) / "multimodal_analysis" / "before_training",
+            "epoch_000_before_training",
+        )
 
     overview_path = Path(config["output_dir"]) / "parameter_overview.csv"
     breakdown_path = Path(config["output_dir"]) / "parameter_breakdown.csv"
@@ -323,17 +507,18 @@ def main():
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=float(config["learning_rate"]),
+        betas=(
+            float(config.get("adam_beta1", 0.9)),
+            float(config.get("adam_beta2", 0.999)),
+        ),
         weight_decay=float(config["weight_decay"]),
     )
-
-    if config.get("scheduler_type") == "cosine":
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config["epochs"])
-    else:
-        scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=20, gamma=0.1)
+    scheduler = build_scheduler(optimizer, config)
 
     scaler = torch.amp.GradScaler(enabled=(device.type == "cuda"))
     metric_tracker = MetricTracker(class_names=train_dataset.classes)
     logger = CSVLogger(config["output_dir"])
+    history_rows = []
 
     best_val_loss = float("inf")
     checkpoints_dir = Path(config["output_dir"]) / "checkpoints"
@@ -363,6 +548,10 @@ def main():
             combined_metrics.update({f"train_{k}": v for k, v in train_metrics.items()})
             combined_metrics.update({f"val_{k}": v for k, v in val_metrics.items()})
             logger.log(epoch, combined_metrics)
+            history_rows.append({"epoch": epoch, **combined_metrics})
+            history_df = pd.DataFrame(history_rows)
+            history_df.to_csv(Path(config["output_dir"]) / "multimodal_history.csv", index=False)
+            save_training_dynamics_plots(history_df, config["output_dir"])
 
             if val_metrics["loss"] < best_val_loss:
                 best_val_loss = val_metrics["loss"]
@@ -379,6 +568,19 @@ def main():
                     best_path,
                 )
                 print(f"Saved new best model with validation loss {best_val_loss:.4f}")
+
+            if description_aux_enabled(config):
+                snapshot_every = int(aux_cfg.get("snapshot_every_n_epochs", 10))
+                if snapshot_every > 0 and (epoch == 1 or epoch % snapshot_every == 0 or epoch == config["epochs"]):
+                    save_mix_snapshot(
+                        model,
+                        fixed_batch,
+                        device,
+                        train_dataset.classes,
+                        inverse_transform,
+                        Path(config["output_dir"]) / "multimodal_analysis" / "during_training",
+                        f"epoch_{epoch:03d}",
+                    )
 
         scheduler.step()
 
@@ -400,6 +602,19 @@ def main():
     best_path = checkpoints_dir / "best_model.pth"
     if best_path.exists():
         try:
+            best_payload = torch.load(best_path, map_location=device)
+            model.load_state_dict(best_payload["state_dict"])
+            model.to(device)
+            model.eval()
+            if description_aux_enabled(config):
+                save_post_training_multimodal_analysis(
+                    model,
+                    val_loader,
+                    device,
+                    train_dataset.classes,
+                    config["output_dir"],
+                    split="val",
+                )
             subprocess.run(
                 ["python", "evaluate.py", "--config", args.config, "--checkpoint", str(best_path), "--split", "val"],
                 check=True,

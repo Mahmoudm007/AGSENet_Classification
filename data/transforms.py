@@ -1,6 +1,7 @@
 import torch
 from torchvision import transforms
 
+
 def get_transforms(image_size: int, split: str = 'train'):
     """
     Returns the appropriate transform pipeline for the specified split.
@@ -12,12 +13,28 @@ def get_transforms(image_size: int, split: str = 'train'):
 
     if split == 'train':
         return transforms.Compose([
-            transforms.Resize((image_size, image_size)),
+            transforms.RandomResizedCrop(
+                size=(image_size, image_size),
+                scale=(0.88, 1.0),
+                ratio=(0.95, 1.05),
+            ),
             transforms.RandomHorizontalFlip(p=0.5),
-            transforms.RandomRotation(degrees=15),
-            transforms.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.1, hue=0.05),
+            transforms.RandomApply([transforms.RandomRotation(degrees=10)], p=0.35),
+            transforms.RandomPerspective(distortion_scale=0.12, p=0.15),
+            transforms.RandomApply(
+                [transforms.ColorJitter(brightness=0.16, contrast=0.18, saturation=0.12, hue=0.03)],
+                p=0.55,
+            ),
+            transforms.RandomGrayscale(p=0.06),
+            transforms.RandomApply([transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 1.2))], p=0.12),
             transforms.ToTensor(),
-            normalize
+            normalize,
+            transforms.RandomErasing(
+                p=0.15,
+                scale=(0.02, 0.08),
+                ratio=(0.5, 2.0),
+                value='random',
+            ),
         ])
     else:
         # For validation and test

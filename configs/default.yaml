@@ -3,8 +3,12 @@ data_path: "Dataset_classes/1 Defined"
 image_size: 256
 batch_size: 16
 epochs: 200
-learning_rate: 0.001
-weight_decay: 1e-4
+learning_rate: 0.0003
+min_learning_rate: 0.000001
+weight_decay: 5e-4
+adam_beta1: 0.9
+adam_beta2: 0.999
+grad_clip_norm: 1.0
 num_workers: 4
 output_dir: "outputs"
 seed: 42
@@ -16,16 +20,21 @@ num_classes: 5
 merge_classes: false
 
 # Optimizer / Scheduler
-scheduler_type: "cosine"  # "cosine" or "step"
+scheduler_type: "warmup_cosine"  # "warmup_cosine", "cosine", or "step"
+warmup_epochs: 8
+warmup_start_factor: 0.15
+step_scheduler_step_size: 20
+step_scheduler_gamma: 0.1
 
 # Loss configuration
-loss_name: "weighted_cross_entropy" # options: "cross_entropy", "weighted_cross_entropy", "focal", "class_balanced_focal"
+loss_name: "balanced_softmax" # options: "cross_entropy", "weighted_cross_entropy", "balanced_softmax", "logit_adjusted_cross_entropy", "focal", "class_balanced_focal"
 use_class_weights: true
 class_weight_mode: "effective_num" # options: "inverse", "median_frequency", "normalized_inverse", "manual", "balanced", "effective_num"
 class_weight_beta: 0.9999
 focal_gamma: 2.0
 focal_alpha: null
-label_smoothing: 0.0
+logit_adjust_tau: 1.0
+label_smoothing: 0.05
 use_weighted_sampler: true
 sampler_weight_mode: "effective_num"
 sampler_weight_beta: 0.9999
@@ -38,13 +47,30 @@ gradcam_target_layer: "auto" # "auto" will select the final fusion block
 # Description-aligned auxiliary learning
 description_aux:
   enabled: true
-  clip_model_name: "openai/clip-vit-large-patch14"
-  clip_max_length: 77
-  clip_batch_size: 8
-  clip_chunk_overlap_tokens: 16
+  text_feature_extractor: "tfidf"
+  tfidf_max_features: 4000
+  tfidf_ngram_range: [1, 2]
+  tfidf_use_char_ngrams: true
+  tfidf_char_max_features: 2000
+  tfidf_char_ngram_range: [3, 5]
+  tfidf_use_svd: false
+  tfidf_svd_dim: 128
+  tfidf_top_terms: 12
+  tfidf_sublinear_tf: true
   hidden_dim: 512
   mix_weight: 0.35
   visual_loss_weight: 0.50
   description_loss_weight: 0.35
   align_loss_weight: 0.15
+  enhanced_visual_loss_weight: 0.20
+  consistency_loss_weight: 0.10
+  consistency_temperature: 1.5
+  contrastive_loss_weight: 0.05
+  contrastive_temperature: 0.10
+  prototype_separation_weight: 0.05
+  prototype_margin: 0.20
   logit_scale_init: 14.2857
+  scale_attention_heads: 4
+  fusion_gate_hidden_dim: 256
+  snapshot_every_n_epochs: 5
+  snapshot_num_images: 12

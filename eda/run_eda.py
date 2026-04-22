@@ -10,6 +10,23 @@ import cv2
 import pandas as pd
 from sklearn.cluster import KMeans
 
+
+def _single_axis_palette_plot(plot_fn, data, x, y, palette, **kwargs):
+    ax = plot_fn(
+        data=data,
+        x=x,
+        y=y,
+        hue=x,
+        palette=palette,
+        dodge=False,
+        **kwargs,
+    )
+    legend = ax.get_legend()
+    if legend is not None:
+        legend.remove()
+    return ax
+
+
 def compute_image_stats(img_path):
     try:
         img = Image.open(img_path).convert('RGB')
@@ -104,8 +121,18 @@ def create_eda_plots(data_dir, output_dir):
         # ==========================================
         # 1. Bar plot & 2. Pie Chart (Class Distrib)
         # ==========================================
+        counts_df = pd.DataFrame({
+            'class': list(counts.keys()),
+            'count': list(counts.values()),
+        })
         plt.figure(figsize=(10, 6))
-        sns.barplot(x=list(counts.keys()), y=list(counts.values()), palette='viridis')
+        _single_axis_palette_plot(
+            sns.barplot,
+            data=counts_df,
+            x='class',
+            y='count',
+            palette='viridis',
+        )
         plt.title(f'01 - Class Count Distribution - {split.upper()} Split', fontsize=14)
         plt.xlabel('Classes')
         plt.ylabel('Number of Images')
@@ -163,7 +190,15 @@ def create_eda_plots(data_dir, output_dir):
         # 5. Aspect Ratio Density
         # ==========================================
         plt.figure(figsize=(10, 6))
-        sns.kdeplot(data=df, x='aspect_ratio', hue='class', common_norm=False, fill=True, alpha=0.3)
+        sns.kdeplot(
+            data=df,
+            x='aspect_ratio',
+            hue='class',
+            common_norm=False,
+            fill=True,
+            alpha=0.3,
+            warn_singular=False,
+        )
         plt.title('05 - Aspect Ratio Density Curves per Class')
         plt.tight_layout()
         plt.savefig(split_out / '05_aspect_ratio_kde.png', dpi=200)
@@ -173,7 +208,13 @@ def create_eda_plots(data_dir, output_dir):
         # 6. File Size Boxplot
         # ==========================================
         plt.figure(figsize=(12, 6))
-        sns.boxplot(data=df, x='class', y='file_size_kb', palette='Set2')
+        _single_axis_palette_plot(
+            sns.boxplot,
+            data=df,
+            x='class',
+            y='file_size_kb',
+            palette='Set2',
+        )
         plt.title('06 - Image File Size Distribution per Class (KB)')
         plt.xticks(rotation=45)
         plt.tight_layout()
@@ -209,7 +250,13 @@ def create_eda_plots(data_dir, output_dir):
         # ==========================================
         df['brightness'] = (df['mean_r'] + df['mean_g'] + df['mean_b']) / 3.0
         plt.figure(figsize=(12, 6))
-        sns.violinplot(data=df, x='class', y='brightness', palette='pastel')
+        _single_axis_palette_plot(
+            sns.violinplot,
+            data=df,
+            x='class',
+            y='brightness',
+            palette='pastel',
+        )
         plt.title('09 - Brightness Violin Plot per Class')
         plt.xticks(rotation=45)
         plt.tight_layout()
@@ -221,7 +268,13 @@ def create_eda_plots(data_dir, output_dir):
         # ==========================================
         df['contrast'] = (df['std_r'] + df['std_g'] + df['std_b']) / 3.0
         plt.figure(figsize=(12, 6))
-        sns.boxplot(data=df, x='class', y='contrast', palette='muted')
+        _single_axis_palette_plot(
+            sns.boxplot,
+            data=df,
+            x='class',
+            y='contrast',
+            palette='muted',
+        )
         plt.title('10 - Image Contrast Variation (Std Dev) per Class')
         plt.xticks(rotation=45)
         plt.tight_layout()
@@ -234,7 +287,15 @@ def create_eda_plots(data_dir, output_dir):
         plt.figure(figsize=(12, 6))
         # Add small epsilon to avoid log(0)
         df['laplacian_logged'] = np.log1p(df['laplacian'])
-        sns.kdeplot(data=df, x='laplacian_logged', hue='class', common_norm=False, fill=True, alpha=0.3)
+        sns.kdeplot(
+            data=df,
+            x='laplacian_logged',
+            hue='class',
+            common_norm=False,
+            fill=True,
+            alpha=0.3,
+            warn_singular=False,
+        )
         plt.title('11 - Edge Density / Sharpness (Log Laplacian Variance)')
         plt.tight_layout()
         plt.savefig(split_out / '11_sharpness_kde.png', dpi=200)
